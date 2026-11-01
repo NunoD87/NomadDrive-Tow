@@ -18,7 +18,7 @@ namespace NomadDriveTow
     /// DampDriverlessMotion pull the velocity to zero at 20 m/s^2) and can put their wheel simulation
     /// to sleep (ApplyWheelSimulationGate). Both are skipped for the towed vehicle while it is attached.
     /// </summary>
-    [BepInPlugin("com.nunod87.nomaddrive.tow", "Nomad Drive Tow (preview)", "0.5.0")]
+    [BepInPlugin("com.nunod87.nomaddrive.tow", "Nomad Drive Tow (preview)", "0.6.0")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin I;
@@ -29,7 +29,6 @@ namespace NomadDriveTow
         private ConfigEntry<bool> _requireSameDirection;
         private ConfigEntry<float> _breakForce;
         private ConfigEntry<float> _pitchRollLimit;
-        private ConfigEntry<float> _yawLimit;
         private ConfigEntry<bool> _skipDriverlessHold;
         private ConfigEntry<bool> _forceWheels;
         private ConfigEntry<bool> _takeAuthority;
@@ -58,7 +57,6 @@ namespace NomadDriveTow
             _requireSameDirection = Config.Bind("General", "RequireSameDirection", true, "Both vehicles must face roughly the same way.");
             _breakForce = Config.Bind("Joint", "BreakForce", 0f, "Force that snaps the tow. 0 = unbreakable.");
             _pitchRollLimit = Config.Bind("Joint", "PitchRollLimitDegrees", 20f, "How far the towed vehicle may pitch/roll against the carrier.");
-            _yawLimit = Config.Bind("Joint", "YawLimitDegrees", 80f, "How far the towed vehicle may swing sideways (yaw).");
             _skipDriverlessHold = Config.Bind("Fixes", "SkipDriverlessHold", true, "While towed, skip the game's driverless-vehicle hold/damping.");
             _forceWheels = Config.Bind("Fixes", "ForceWheelSimulation", true, "While towed, keep the wheel simulation awake.");
             _takeAuthority = Config.Bind("Fixes", "HostTakesAuthority", true, "On attach, give the towed vehicle's network ownership to the host so the host simulates it (needed if a client drove it last).");
@@ -66,7 +64,7 @@ namespace NomadDriveTow
             _blockDriver = Config.Bind("Fixes", "BlockTowedDriverControls", true, "While towed, ignore the towed vehicle's driver throttle/brakes/handbrake (nobody drives two cars at once).");
             _allowSteer = Config.Bind("Fixes", "AllowTowedSteering", false, "Let the towed vehicle's driver still steer.");
             _autoRelease = Config.Bind("Joint", "AutoReleaseGapMetres", 4f, "Release the tow automatically if the hitch stretches this far (crash or physics glitch). 0 = never.");
-            Logger.LogInfo("Nomad Drive Tow 0.5 (preview) loaded. Host only. Press " + _key.Value + " near two vehicles.");
+            Logger.LogInfo("Nomad Drive Tow 0.6 (preview) loaded. Host only. Press " + _key.Value + " near two vehicles.");
         }
 
         private void Update()
@@ -99,7 +97,7 @@ namespace NomadDriveTow
                                " m/s, towed " + tSpeed.ToString("0.00") + " m/s  jointForce=" +
                                _joint.currentForce.magnitude.ToString("0") + "N  towed: kinematic=" + _towedRb.isKinematic +
                                " sleeping=" + _towedRb.IsSleeping() + " handbrakeOn=" + HandbrakeOn(_towedVm) +
-                               " wheelSimAsleep=" + WheelSimAsleep(_towedVm));
+                               " wheelSimAsleep=" + WheelSimAsleep(_towedVm) + " steer=" + _steerSmoothed.ToString("0.00"));
             }
         }
 
@@ -282,9 +280,48 @@ namespace NomadDriveTow
                 if (input == null) return;
                 SetMember(input, "Throttle", 0f); SetMember(input, "Brakes", 0f);
                 SetMember(input, "Handbrake", 0f); SetMember(input, "Clutch", 1f);
-                if (!p._allowSteer.Value) SetMember(input, "Steering", 0f);
+                if (!p._allowSteer.Value) SetMember(input, "Steering", p.TowSteering(__instance));
             }
             catch { }
+        }
+
+        // v0.6 tuning values (hard-coded on purpose; tuned between test runs).
+        private const float YawLimit = 40f;          // degrees (was 80)
+        private const float LinearSlack = 0.1f;      // metres of give in the hitch before the spring pushes back
+        private const float LinearSpring = 1_000_000f;
+        private const float LinearDamper = 100_000f;
+        private const float AngularDamper = 20_000f;
+        private const float AngularCentring = 30_000f;
+        private const float SteerMinSpeed = 0.5f;    // m/s: below this the towed wheels stay straight
+        private const float SteerSmoothing = 8f;     // 1/s
+        private const float DefaultMaxSteerAngle = 30f;
+        private float _steerSmoothed;
+
+        // Free-castering front wheels: point them along the direction the hitch end of the towed
+        // vehicle is actually travelling, so the front axle does not scrub sideways in corners.
+        private float TowSteering(object vc)
+        {
+            try
+            {
+                var rb = _towedRb;
+                if (rb == null || _joint == null) return 0f;
+                var hitch = rb.transform.TransformPoint(_joint.anchor);
+                var local = rb.transform.InverseTransformDirection(rb.GetPointVelocity(hitch));
+                local.y = 0f;
+                float target = 0f;
+                if (local.magnitude > SteerMinSpeed)
+                {
+                    float angle = Mathf.Atan2(local.x * Mathf.Sign(local.z == 0f ? 1f : local.z), Mathf.Abs(local.z)) * Mathf.Rad2Deg;
+                    float max = DefaultMaxSteerAngle;
+                    var st = Member(vc, "steering");
+                    var m = st == null ? null : (Member(st, "maximumSteerAngle") ?? Member(st, "maxSteerAngle"));
+                    if (m is float f && f > 1f) max = f;
+                    target = Mathf.Clamp(angle / max, -1f, 1f);
+                }
+                _steerSmoothed = Mathf.Lerp(_steerSmoothed, target, 1f - Mathf.Exp(-SteerSmoothing * Time.fixedDeltaTime));
+                return _steerSmoothed;
+            }
+            catch { return 0f; }
         }
 
         // Mirror authority: a vehicle last driven by a client stays client-owned, so the host copy is
@@ -384,14 +421,25 @@ namespace NomadDriveTow
             _joint.autoConfigureConnectedAnchor = false;
             _joint.anchor = bestT.Root.InverseTransformPoint(hitch);
             _joint.connectedAnchor = bestC.Root.InverseTransformPoint(hitch);
-            _joint.xMotion = _joint.yMotion = _joint.zMotion = ConfigurableJointMotion.Locked;
+            // v0.6: damped, slightly compliant hitch instead of a rigid lock, so it does not jitter or snap.
+            _joint.xMotion = _joint.yMotion = _joint.zMotion = ConfigurableJointMotion.Limited;
+            _joint.linearLimit = new SoftJointLimit { limit = LinearSlack };
+            _joint.linearLimitSpring = new SoftJointLimitSpring { spring = LinearSpring, damper = LinearDamper };
             _joint.angularXMotion = ConfigurableJointMotion.Limited;
             _joint.angularYMotion = ConfigurableJointMotion.Limited;
             _joint.angularZMotion = ConfigurableJointMotion.Limited;
             _joint.lowAngularXLimit = new SoftJointLimit { limit = -_pitchRollLimit.Value };
             _joint.highAngularXLimit = new SoftJointLimit { limit = _pitchRollLimit.Value };
-            _joint.angularYLimit = new SoftJointLimit { limit = _yawLimit.Value };
+            _joint.angularYLimit = new SoftJointLimit { limit = YawLimit };
             _joint.angularZLimit = new SoftJointLimit { limit = _pitchRollLimit.Value };
+            // Damping on all three angular axes plus a mild centring spring on yaw/pitch: the towed
+            // vehicle follows the carrier's heading instead of flopping around inside the limits.
+            _joint.rotationDriveMode = RotationDriveMode.XYAndZ;
+            _joint.targetRotation = Quaternion.identity;
+            _joint.targetAngularVelocity = Vector3.zero;
+            _joint.angularXDrive = new JointDrive { positionSpring = 0f, positionDamper = AngularDamper, maximumForce = float.MaxValue };
+            _joint.angularYZDrive = new JointDrive { positionSpring = AngularCentring, positionDamper = AngularDamper, maximumForce = float.MaxValue };
+            _steerSmoothed = 0f;
             _joint.enableCollision = false;
             _joint.projectionMode = JointProjectionMode.None;
             if (_breakForce.Value > 0f) { _joint.breakForce = _breakForce.Value; _joint.breakTorque = _breakForce.Value; }

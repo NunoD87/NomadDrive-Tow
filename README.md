@@ -92,7 +92,6 @@ The plugin picks the pair whose hitch points are closest: the front vehicle's re
 | `General` / `RequireSameDirection` | `true` | Both vehicles must face the same way |
 | `Joint` / `BreakForce` | `0` | Force that snaps the tow (0 = never) |
 | `Joint` / `PitchRollLimitDegrees` | `20` | How far the towed vehicle may pitch or roll against the carrier |
-| `Joint` / `YawLimitDegrees` | `80` | How far it may swing sideways |
 | `Joint` / `AutoReleaseGapMetres` | `4` | Release the tow if the hitch stretches this far (0 = never) |
 | `Fixes` / `HostTakesAuthority` | `true` | Host takes network ownership of the towed vehicle while towing, and gives it back |
 | `Fixes` / `PrepareTowedVehicle` | `true` | Neutral gear and no idle braking on the towed vehicle (restored on release) |
@@ -153,7 +152,7 @@ Contributions are welcome.
 5. Open a Pull Request
 
 Build locally with `dotnet build src/NomadDriveTow/NomadDriveTow.csproj -c Release`.
-CI builds every push, and pushing a tag like `v0.5.1` publishes a GitHub Release with the zip.
+CI builds every push, and pushing a tag like `v0.6.0` publishes a GitHub Release with the zip.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
